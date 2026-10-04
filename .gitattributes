@@ -1,0 +1,10 @@
+# Enforce consistent LF line endings across operating systems
+* text=auto eol=lf
+
+# Explicit syntax and diff attributes
+*.sh text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf

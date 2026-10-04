@@ -1,0 +1,147 @@
+name: Publish Debian Releases
+description: Build, prune, resolve version conflicts, and publish Debian bundles from the checked-out repository.
+
+inputs:
+  targets_json:
+    description: JSON array describing the publishable Debian bundles and their release metadata
+    required: true
+
+  version_conflict_policy:
+    description: How to handle published versions that are equal to or greater than the workspace version
+    required: false
+    default: patch
+
+  merge_pr:
+    description: Whether to auto-merge a generated version-bump pull request before continuing publish
+    required: false
+    default: 'true'
+
+  disable_prune_by_git_diff:
+    description: Whether to skip the prune-by-git-diff step
+    required: false
+    default: 'false'
+
+  disable_prune_by_build_diff:
+    description: Whether to skip the prune-by-build-diff step
+    required: false
+    default: 'false'
+
+  node_version:
+    description: Node.js version used for install, build, and publish steps
+    required: false
+    default: '26'
+
+runs:
+  using: composite
+  steps:
+    # Save inputs (and other invariants) as env vars so they're available to all subsequent steps without being passed explicitly as `with` or `env`.
+    # Note that because this is a composite action, `INPUT_<VARIABLE_NAME>` won't be created automatically from inputs. (https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax#example-specifying-inputs)
+    - name: Initialize Workflow Env
+      shell: bash
+      run: |
+        # Bash parses the outer heredoc (cat <<EOF ... EOF) to write the inner block (TARGETS_JSON<<EOF_TARGETS_JSON ... EOF_TARGETS_JSON) into GITHUB_ENV as-is.
+        # Distinct delimiters are required.
+        cat <<EOF >> "$GITHUB_ENV"
+        TARGETS_JSON<<EOF_TARGETS_JSON
+        $TARGETS_JSON
+        EOF_TARGETS_JSON
+        EOF
+
+        # The reusable publish tools live alongside this action in the workflow repository. Since reworking this logic as an Action rather than a Workflow, we can resolve them from `github.action_path` instead of performing a second checkout.
+        echo "TOOLKIT_PATH=${{ github.action_path }}/../toolkit" >> "$GITHUB_ENV"
+
+        # Branch of target repo to check out and publish from.
+        echo "BASE_BRANCH=${{ github.ref_name || github.event.repository.default_branch }}" >> "$GITHUB_ENV"
+
+        # Policy to resolve version conflicts (i.e. when a package version that is equal to or greater than the workspace version is already published).
+        echo "VERSION_CONFLICT_POLICY=${{ inputs.version_conflict_policy }}" >> "$GITHUB_ENV"
+      env:
+        # Pass value via `env` (rather than replacing `$TARGETS_JSON` with `${{ inputs.targets_json }}`) to prevent shell quoting issues and command injection.
+        TARGETS_JSON: ${{ inputs.targets_json }}
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node_version }}
+
+    - name: Install toolkit npm dependencies
+      shell: bash
+      run: node "$TOOLKIT_PATH/install-toolkit-deps.js"
+
+    - name: Prune by git diff
+      if: ${{ !contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.disable_prune_by_git_diff))) }}
+      shell: bash
+      run: node "${{ github.action_path }}/prune-deb-by-git-diff.js"
+
+    - name: Build candidates
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }} # Reparse the current `TARGETS_JSON` payload so each gate follows the latest subset persisted by the last prune step.
+      shell: bash
+      run: node "${{ github.action_path }}/build-deb.js"
+
+    - name: Prune by build diff
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' && !contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.disable_prune_by_build_diff))) }}
+      shell: bash
+      run: node "${{ github.action_path }}/prune-deb-by-build-diff.js"
+      env:
+        GITHUB_TOKEN: ${{ github.token }} # Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret)
+
+    - name: Resolve versions conflicts
+      id: resolve_versions_conflicts
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/resolve-deb-version-conflicts.js"
+      env:
+        MERGE_PR: ${{ inputs.merge_pr }}
+
+    - name: Ensure versions update pull request targets a branch
+      if: ${{ steps.resolve_versions_conflicts.outputs.version_files != '' }}
+      shell: bash
+      run: bash "$TOOLKIT_PATH/ensure-versions-update-pr-target-branch.sh"
+
+    - name: Create versions update pull request
+      id: create_versions_pr
+      if: ${{ steps.resolve_versions_conflicts.outputs.version_files != '' }}
+      uses: peter-evans/create-pull-request@v8
+      with:
+        token: ${{ github.token }}
+        add-paths: ${{ steps.resolve_versions_conflicts.outputs.version_files }}
+        author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+        base: ${{ env.BASE_BRANCH }}
+        branch: automation/publish-packages-versions-conflicts/debian/${{ github.ref_name }}
+        commit-message: 'chore: resolve Debian packages versions conflicts'
+        committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+        title: 'chore: resolve Debian packages versions conflicts'
+        body: |
+          This pull request was opened automatically by the `Publish Packages (Debian)` workflow.
+
+          The workflow detected published Debian bundle versions that are equal to or greater than the workspace versions, so it applied the `${{ env.VERSION_CONFLICT_POLICY }}` conflict policy to the affected Debian bundle metadata files.
+
+          When `merge_pr=true`, the workflow merges this pull request automatically before refreshing the checkout and continuing with build and publish.
+
+          When `merge_pr=false`, the workflow leaves this pull request open and skips publishing any Debian bundles that required the version bump.
+
+    - name: Merge versions update pull request
+      id: merge_versions_pr
+      if: ${{ steps.create_versions_pr.outputs.pull-request-number != '' && contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.merge_pr))) }} # Composite-action callers pass `merge_pr` as a string, while reusable-workflow callers may pass a boolean, so we check both.
+      shell: bash
+      run: node "$TOOLKIT_PATH/merge-versions-update-pr.js"
+      env:
+        GITHUB_TOKEN: ${{ github.token }} # Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+        PULL_REQUEST_NUMBER: ${{ steps.create_versions_pr.outputs.pull-request-number }}
+
+    - name: Refresh checkout after merge
+      if: ${{ steps.merge_versions_pr.outcome == 'success' }}
+      shell: bash
+      run: bash "$TOOLKIT_PATH/refresh-checkout-after-merge.sh"
+
+    # `resolve_versions_conflicts.js` narrows `TARGETS_JSON` itself when bumped targets should be skipped in this run.
+    - name: Build selected targets
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/build-deb.js"
+
+    - name: Publish selected targets
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/publish-deb.js"
+      env:
+        GITHUB_TOKEN: ${{ github.token }} # Or `secrets.GITHUB_TOKEN` (unless called from another workflow which hadn't forwarded this secret).

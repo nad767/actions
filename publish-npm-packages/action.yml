@@ -1,0 +1,235 @@
+name: Publish NPM Packages
+description: Build, prune, resolve version conflicts, and publish NPM Packages from the checked-out repository.
+
+inputs:
+  targets_json:
+    description: JSON array describing the publishable NPM Packages and any package-specific build settings
+    required: true
+
+  registry:
+    description: "Default npm registry name or alias list for targets that omit `registry` (for example: 'ghp', 'npmjs', or 'ghp, npmjs')"
+    required: false
+    default: ghp
+
+  npmjs_token:
+    description: Auth token for publishing to the npmjs registry. Required when any package targets the 'npmjs' registry.
+    required: false
+
+  ghp_scope:
+    description: GitHub Packages scope to publish under. Tolerant to having/not-having '@' prefix. Defaults to '<repo-owner>'.
+    required: false
+
+  tag:
+    description: npm dist-tag to publish under
+    required: false
+    default: latest
+
+  stage_to_npmjs:
+    description: Whether to stage packages to npmjs (using `npm stage publish` for manual approval onsite) instead of performing a direct full publish
+    required: false
+    default: 'true'
+
+  version_conflict_policy:
+    description: How to handle published versions that are equal to or greater than the workspace version
+    required: false
+    default: patch
+
+  merge_pr:
+    description: Whether to auto-merge a generated version-bump pull request before continuing publish
+    required: false
+    default: 'true'
+
+  disable_prune_by_git_diff:
+    description: Whether to skip the prune-by-git-diff step
+    required: false
+    default: 'false'
+
+  disable_prune_by_build_diff:
+    description: Whether to skip the prune-by-build-diff step
+    required: false
+    default: 'false'
+
+  node_version:
+    description: Node.js version used for install, build, and publish steps
+    required: false
+    default: '26'
+
+  npmrc_secrets:
+    description: Optional newline-delimited KEY=VALUE entries exposed to npm while installing publishable package dependencies
+    required: false
+
+runs:
+  using: composite
+  steps:
+    # Save inputs (and other invariants) as env vars so they're available to all subsequent steps without being passed explicitly as `with` or `env`.
+    # Note that because this is a composite action, `INPUT_<VARIABLE_NAME>` won't be created automatically from inputs. (https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax#example-specifying-inputs)
+    - name: Initialize Workflow Env
+      shell: bash
+      run: |
+        # Bash parses the outer heredoc (cat <<EOF ... EOF) to write the inner block (TARGETS_JSON<<EOF_TARGETS_JSON ... EOF_TARGETS_JSON) into GITHUB_ENV as-is.
+        # Distinct delimiters are required.
+        cat <<EOF >> "$GITHUB_ENV"
+        TARGETS_JSON<<EOF_TARGETS_JSON
+        $TARGETS_JSON
+        EOF_TARGETS_JSON
+        EOF
+
+        # Later prune steps intentionally narrow `TARGETS_JSON`, but cross-package rewrites still need the original publishable graph so pruned dependencies are renamed too.
+        cat <<EOF >> "$GITHUB_ENV"
+        ALL_TARGETS_JSON<<EOF_ALL_TARGETS_JSON
+        $TARGETS_JSON
+        EOF_ALL_TARGETS_JSON
+        EOF
+
+        # The reusable publish tools live alongside this action in the workflow repository. Since reworking this logic as an Action rather than a Workflow, we can resolve them from `github.action_path` instead of performing a second checkout.
+        echo "TOOLKIT_PATH=${{ github.action_path }}/../toolkit" >> "$GITHUB_ENV"
+
+        # Default registry name or alias list for packages that don't specify their own `registry` field.
+        echo "REGISTRY=${{ inputs.registry }}" >> "$GITHUB_ENV"
+
+        # GitHub Packages scope to publish under.
+        echo "GHP_SCOPE=${{ inputs.ghp_scope || github.repository_owner }}" >> "$GITHUB_ENV"
+
+        # npm dist-tag to publish under.
+        echo "PUBLISH_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
+
+        # Whether to stage packages to npmjs (using `npm stage publish` for manual approval onsite) instead of performing a direct full publish.
+        echo "STAGE_TO_NPMJS=${{ inputs.stage_to_npmjs }}" >> "$GITHUB_ENV"
+
+        # Branch of target repo to check out and publish from.
+        echo "BASE_BRANCH=${{ github.ref_name || github.event.repository.default_branch }}" >> "$GITHUB_ENV"
+
+        # Policy to resolve version conflicts (i.e. when a package version that is equal to or greater than the workspace version is already published).
+        echo "VERSION_CONFLICT_POLICY=${{ inputs.version_conflict_policy }}" >> "$GITHUB_ENV"
+      env:
+        # Pass value via `env` (rather than replacing `$TARGETS_JSON` with `${{ inputs.targets_json }}`) to prevent shell quoting issues and command injection.
+        TARGETS_JSON: ${{ inputs.targets_json }}
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node_version }}
+        # `registry-url` intentionally omitted.
+        # Its presence causes `actions/setup-node@v7` to generate a "per-user" `.npmrc`, that uses `NODE_AUTH_TOKEN` as a placeholder for authenticating to `REGISTRY`.
+        # Problems start when the target repository already ships with a `.npmrc` that also happens to configure `REGISTRY`, in which case it (being "pre-project") takes precedence over the `.npmrc` generated by `actions/setup-node@v7` (which is "per-user"), and thus breaking authentication to the registry (unless we can ensure its always going to authenticate successfully with its own config, which we can't apriori, since the workflow is meant to be reusable across repositories with different configurations).
+        # registry-url: ${{ format('https://{0}', env.REGISTRY) }}
+
+    - name: Install toolkit npm dependencies
+      shell: bash
+      run: node "$TOOLKIT_PATH/install-toolkit-deps.js"
+      env:
+        GITHUB_TOKEN: ${{ github.token }} # Used by `spawnAuthNpmAsync`.
+
+    - name: Prune by git diff
+      if: ${{ !contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.disable_prune_by_git_diff))) }}
+      shell: bash
+      run: node "${{ github.action_path }}/prune-npm-by-git-diff.js"
+      env:
+        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
+        GITHUB_TOKEN: ${{ github.token }} # Used by `spawnAuthNpmAsync`.
+        NPMJS_TOKEN: ${{ inputs.npmjs_token }} # Auth token for querying the npmjs registry.
+
+    # Reparse the current `TARGETS_JSON` payload so each gate follows the latest subset persisted by the last prune step.
+    - name: Install publishable packages dependencies
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/install-npm-deps.js"
+      env:
+        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
+        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+
+    - name: Build
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/build-npm.js"
+      env:
+        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
+        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+
+    - name: Prune by build diff
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' && !contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.disable_prune_by_build_diff))) }}
+      shell: bash
+      run: node "${{ github.action_path }}/prune-npm-by-build-diff.js"
+      env:
+        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
+        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+        NPMJS_TOKEN: ${{ inputs.npmjs_token }} # Auth token for querying the npmjs registry.
+      # `GITHUB_TOKEN`, `NPMRC_SECRETS`, `GHP_SCOPE`, `REGISTRY`, `TOOLKIT_PATH` are set in the workflow/action env (supra).
+      # `GITHUB_REPOSITORY`, `GITHUB_OUTPUT`, `GITHUB_WORKSPACE` are injected automatically by GitHub Actions.
+      # <DEPRECATED>
+      # run: >-
+      #   node "$TOOLKIT_PATH/prune-npm-by-build-diff.js"
+      #   --ghp-scope "$GHP_SCOPE"
+      #   --owner     "${{ github.repository_owner }}"
+      #   --repo      "${{ github.event.repository.name }}"
+      # </DEPRECATED>
+
+    - name: Resolve versions conflicts
+      id: resolve_versions_conflicts
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/resolve-npm-version-conflicts.js"
+      env:
+        MERGE_PR: ${{ inputs.merge_pr }}
+        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
+        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+        NPMJS_TOKEN: ${{ inputs.npmjs_token }} # Auth token for querying the npmjs registry.
+      # `GITHUB_TOKEN`, `MERGE_PR`, `GHP_SCOPE`, `NPMRC_SECRETS`, `TOOLKIT_PATH`, and `VERSION_CONFLICT_POLICY` are set in the workflow/action env (supra).
+      # `GITHUB_REPOSITORY`, `GITHUB_OUTPUT`, `GITHUB_WORKSPACE` are injected automatically by GitHub Actions.
+      # <DEPRECATED>
+      # run: >-
+      #   node "$TOOLKIT_PATH/resolve-npm-version-conflicts.js"
+      #   --ghp-scope "$GHP_SCOPE"
+      #   --policy    "$VERSION_CONFLICT_POLICY"
+      # </DEPRECATED>
+
+    - name: Ensure versions update pull request targets a branch
+      if: ${{ steps.resolve_versions_conflicts.outputs.version_files != '' }}
+      shell: bash
+      run: bash "$TOOLKIT_PATH/ensure-versions-update-pr-target-branch.sh"
+
+    - name: Create versions update pull request
+      id: create_versions_pr
+      if: ${{ steps.resolve_versions_conflicts.outputs.version_files != '' }}
+      uses: peter-evans/create-pull-request@v8 # TODO: fork, and add a cleanup stage, where if the PR exists at the end of the workflow (due to an error in a subsequent step), it is closed with a comment linking to the workflow run.
+      with:
+        token: ${{ github.token }} # Or `secrets.GITHUB_TOKEN` (unless called from another workflow which hadn't forwarded this secret)
+        add-paths: ${{ steps.resolve_versions_conflicts.outputs.version_files }}
+        author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+        base: ${{ env.BASE_BRANCH }}
+        branch: automation/publish-packages-versions-conflicts/npm/${{ github.ref_name }}
+        commit-message: 'chore: resolve npm packages versions conflicts'
+        committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+        title: 'chore: resolve npm packages versions conflicts'
+        body: |
+          This pull request was opened automatically by the `Publish Packages (npm)` workflow.
+
+          The workflow detected published package versions that are equal to or greater than the workspace versions, so it applied the `${{ env.VERSION_CONFLICT_POLICY }}` conflict policy to the affected package manifests and configured lockfile.
+
+          When `merge_pr=true`, the workflow merges this pull request automatically before refreshing the checkout and continuing with build and publish.
+
+          When `merge_pr=false`, the workflow leaves this pull request open and skips publishing any packages that required the version bump.
+
+    # Composite-action callers pass `merge_pr` as a string, while reusable-workflow callers may pass a boolean, so we check both.
+    - name: Merge versions update pull request
+      id: merge_versions_pr
+      if: ${{ steps.create_versions_pr.outputs.pull-request-number != '' && contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.merge_pr))) }}
+      shell: bash
+      run: node "$TOOLKIT_PATH/merge-versions-update-pr.js"
+      env:
+        GITHUB_TOKEN: ${{ github.token }} # Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret)
+        PULL_REQUEST_NUMBER: ${{ steps.create_versions_pr.outputs.pull-request-number }}
+
+    - name: Refresh checkout after merge
+      if: ${{ steps.merge_versions_pr.outcome == 'success' }}
+      shell: bash
+      run: bash "$TOOLKIT_PATH/refresh-checkout-after-merge.sh"
+
+    - name: Publish selected targets
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/publish-npm.js"
+      env:
+        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
+        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+        NPMJS_TOKEN: ${{ inputs.npmjs_token }} # Auth token for publishing to the npmjs registry.
+        STAGE_TO_NPMJS: ${{ inputs.stage_to_npmjs }}

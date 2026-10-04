@@ -1,0 +1,179 @@
+name: Publish Devcontainer Features
+description: Prune, resolve version conflicts, and publish Devcontainer Features from the checked-out repository.
+
+inputs:
+  targets_json:
+    description: JSON array of the Devcontainer Features to publish
+    required: true
+
+  registry:
+    description: Container registry to publish to
+    required: false
+    default: ghcr.io
+
+  namespace:
+    description: GitHub user or organization that should own the published GHCR packages. Avoid '@' prefix as it's added automatically in the appropriate contexts.
+    required: false
+    # Ideally we would have liked our Features to be available at `<registry>/<owner>/<feature>` (e.g. `ghcr.io/nad767/feature-bar`), like our NPM packages.
+    # However, `devcontainers/action` and `@devcontainers/cli` seem to require a `<registry>/<owner>/<collection>/<feature>` format (e.g. `ghcr.io/nad767/repo-foo/feature-bar`). Perhaps this is an OCI registry requirement.
+    # Note that if we try the `<registry>/<owner>/<feature>` format, the package does get created at that path (idk if it's just visible or actually usable) but anyway the operation throws with 400 "name not allowed".
+    # Anyway, the `<collection>` segment is often the repository name (as in the example above). This is the default behavior of `devcontainers/action` and perhaps also `@devcontainers/cli`'s.
+    # However that couples the published package path to the repository name, which is not ideal. Therefore, we publish features into a generic collection namespace `<owner>/features` so the GHCR is decoupled from the repository name.
+    default: ${{ github.repository_owner }}/features
+
+  version_conflict_policy:
+    description: How to handle published versions that are equal to or greater than the workspace version
+    required: false
+    default: minor
+
+  merge_pr:
+    description: Whether to auto-merge a generated version-bump pull request before continuing publish
+    required: false
+    default: 'true'
+
+  disable_prune_by_git_diff:
+    description: Whether to skip the prune-by-git-diff step
+    required: false
+    default: 'false'
+
+  disable_prune_by_build_diff:
+    description: Whether to skip the prune-by-build-diff step
+    required: false
+    default: 'false'
+
+  node_version:
+    description: Node.js version used for helper-script execution
+    required: false
+    default: '26'
+
+runs:
+  using: composite
+  steps:
+    # Save inputs (and other invariants) as env vars so they're available to all subsequent steps without being passed explicitly as `with` or `env`.
+    # Note that because this is a composite action, `INPUT_<VARIABLE_NAME>` won't be created automatically from inputs. (https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax#example-specifying-inputs)
+    - name: Initialize Workflow Env
+      shell: bash
+      run: |
+        # Bash parses the outer heredoc (cat <<EOF ... EOF) to write the inner block (TARGETS_JSON<<EOF_TARGETS_JSON ... EOF_TARGETS_JSON) into GITHUB_ENV as-is.
+        # Distinct delimiters are required.
+        cat <<EOF >> "$GITHUB_ENV"
+        TARGETS_JSON<<EOF_TARGETS_JSON
+        $TARGETS_JSON
+        EOF_TARGETS_JSON
+        EOF
+
+        echo "TOOLKIT_PATH=${{ github.action_path }}/../toolkit" >> "$GITHUB_ENV"
+        echo "REGISTRY=${{ inputs.registry }}" >> "$GITHUB_ENV"
+        echo "NAMESPACE=${{ inputs.namespace }}" >> "$GITHUB_ENV"
+        echo "BASE_BRANCH=${{ github.ref_name || github.event.repository.default_branch }}" >> "$GITHUB_ENV"
+        echo "FEATURES_PUBLISH_DIR=$RUNNER_TEMP/publish-devcontainer-features-stage" >> "$GITHUB_ENV"
+        echo "VERSION_CONFLICT_POLICY=${{ inputs.version_conflict_policy }}" >> "$GITHUB_ENV"
+      env:
+        # Pass value via `env` (rather than replacing `$TARGETS_JSON` with `${{ inputs.targets_json }}`) to prevent shell quoting issues and command injection.
+        TARGETS_JSON: ${{ inputs.targets_json }}
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node_version }}
+
+    - name: Install toolkit npm dependencies
+      shell: bash
+      run: node "$TOOLKIT_PATH/install-toolkit-deps.js"
+
+    - name: Prune by git diff
+      if: ${{ !contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.disable_prune_by_git_diff))) }}
+      shell: bash
+      run: node "${{ github.action_path }}/prune-devcontainer-features-by-git-diff.js"
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+
+    # Reparse the current `TARGETS_JSON` payload so each gate follows the latest subset persisted by the last prune step.
+    - name: Stage candidates
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/stage-devcontainer-features.js"
+
+    - name: Prune by build diff
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' && !contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.disable_prune_by_build_diff))) }}
+      shell: bash
+      run: node "${{ github.action_path }}/prune-devcontainer-features-by-build-diff.js"
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+
+    - name: Resolve versions conflicts
+      id: resolve_versions_conflicts
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/resolve-devcontainer-features-version-conflicts.js"
+      env:
+        MERGE_PR: ${{ inputs.merge_pr }}
+        GITHUB_TOKEN: ${{ github.token }}
+
+    - name: Ensure versions update pull request targets a branch
+      if: ${{ steps.resolve_versions_conflicts.outputs.version_files != '' }}
+      shell: bash
+      run: bash "$TOOLKIT_PATH/ensure-versions-update-pr-target-branch.sh"
+
+    - name: Create versions update pull request
+      id: create_versions_pr
+      if: ${{ steps.resolve_versions_conflicts.outputs.version_files != '' }}
+      uses: peter-evans/create-pull-request@v8
+      with:
+        token: ${{ github.token }}
+        add-paths: ${{ steps.resolve_versions_conflicts.outputs.version_files }}
+        author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+        base: ${{ env.BASE_BRANCH }}
+        branch: automation/publish-packages-versions-conflicts/devcontainer-features/${{ github.ref_name }}
+        commit-message: 'chore: resolve devcontainer feature versions conflicts'
+        committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+        title: 'chore: resolve devcontainer feature versions conflicts'
+        body: |
+          This pull request was opened automatically by the `Publish Devcontainer Features` workflow.
+
+          The workflow detected published devcontainer feature versions that are equal to or greater than the workspace versions, so it applied the `${{ env.VERSION_CONFLICT_POLICY }}` conflict policy to the affected `devcontainer-feature.json` manifests.
+
+          When `merge_pr=true`, the workflow merges this pull request automatically before refreshing the checkout and continuing with publish.
+
+          When `merge_pr=false`, the workflow leaves this pull request open and skips publishing any devcontainer features that required the version bump.
+
+    # Composite-action callers pass `merge_pr` as a string, while reusable-workflow callers may pass a boolean, so we check both.
+    - name: Merge versions update pull request
+      id: merge_versions_pr
+      if: ${{ steps.create_versions_pr.outputs.pull-request-number != '' && contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.merge_pr))) }}
+      shell: bash
+      run: node "$TOOLKIT_PATH/merge-versions-update-pr.js"
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        PULL_REQUEST_NUMBER: ${{ steps.create_versions_pr.outputs.pull-request-number }}
+
+    - name: Refresh checkout after merge
+      if: ${{ steps.merge_versions_pr.outcome == 'success' }}
+      shell: bash
+      run: bash "$TOOLKIT_PATH/refresh-checkout-after-merge.sh"
+
+    # `resolve_versions_conflicts.js` narrows `TARGETS_JSON` itself when bumped targets should be skipped in this run.
+    - name: Stage selected targets
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: node "${{ github.action_path }}/stage-devcontainer-features.js"
+
+
+    # Succeed `devcontainers/action@v1` by invoking `@devcontainers/cli` directly, because:
+    # - `devcontainers/action@v1` is unmaintained (last meaningful commit in January 2024; used node v20 which triggered a workflow warning).
+    # - `devcontainers/action@v1` pollutes workflow's log with schema validation warnings/errors.
+    #    Setting `disable-schema-validation: true` only makes error non-fatal (afaik), however they still create unnecessary noise.
+    - name: Publish selected targets
+      if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
+      shell: bash
+      run: |
+        npx --yes @devcontainers/cli@latest features publish \
+          -r "${{ inputs.registry }}" \
+          -n "${{ inputs.namespace }}" \
+          "${{ env.FEATURES_PUBLISH_DIR }}"
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+
+    # Not implemented on purpose:
+    # The feature-starter workflow follows `generate-docs: true` with a step that commits generated README updates onto a fresh branch and opens a pull request via `gh pr create`. (see https://github.com/devcontainers/feature-starter/blob/main/.github/workflows/release.yaml)
+    # That extra step is only useful when we let the action mutate docs in the workspace.
+    # If we ever switch `generate-docs` to `true`, we should add that PR-creation step here as well and also grant `pull-requests: write`.
