@@ -294,15 +294,26 @@ export async function spawnAuthNpmAsync(
         // Restore the original `.npmrc` once the caller finishes its npm work.
         // Note: `.finally()` fulfills with the eventual state of the promise, i.e. the caller will see the final outcome of the original promise (whether resolved or rejected), which is the desired behavior.
         // See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/finally#:~:text=A%20finally()%20call%20is%20usually%20transparent%20and%20reflects%20the%20eventual%20state%20of%20the%20original%20promise.
-        .finally(async () => {
+        // `finally`'s cleanup must catch all its errors to avoid masking any errors thrown by the original promise. Returning promises is fine, it just makes `finally` wait for them to settle before fulfilling the original promise.
+        .finally(() => {
             if (!didRewriteNpmrc) return;
             if (npmrcContents === null) {
-                await unlink(resolvedNpmrcPath).catch(err => { if (err?.code !== 'ENOENT') throw err; });
-                console.debug(`Removed temporary \`${resolvedNpmrcPath}\`.`);
+                return unlink(resolvedNpmrcPath)
+                    .then(() => {
+                        console.debug(`Removed temporary \`${resolvedNpmrcPath}\`.`);
+                    })
+                    .catch(err => {
+                        if (err?.code !== 'ENOENT') {
+                            console.error(`Failed to remove temporary \`${resolvedNpmrcPath}\`:`, err);
+                        }
+                    });
             }
-            else {
-                await writeFile(resolvedNpmrcPath, npmrcContents);
-                console.debug(`Restored original \`${resolvedNpmrcPath}\`.`);
-            }
+            return writeFile(resolvedNpmrcPath, npmrcContents)
+                .then(() => {
+                    console.debug(`Restored original \`${resolvedNpmrcPath}\`.`);
+                })
+                .catch(err => {
+                    console.error(`Failed to restore \`${resolvedNpmrcPath}\`:`, err);
+                });
         });
 }
