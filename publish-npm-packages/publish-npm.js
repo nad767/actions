@@ -11,10 +11,13 @@ import path from 'node:path';
 import { createNpmPackageNameMappings } from '../toolkit/utils/createNpmPackageNameMappings.js';
 import { createNpmStagingEnvironment } from '../toolkit/utils/createNpmStagingEnvironment.js';
 import { getPublishedNpmVersions } from '../toolkit/utils/getPublishedNpmVersions.js';
+import { findOverlappingStagedNpmPackages } from '../toolkit/utils/findOverlappingStagedNpmPackages.js';
+import { getStagedNpmPackages } from '../toolkit/utils/getStagedNpmPackages.js';
 import { normalizeNpmsConf } from '../toolkit/utils/normalizeNpmsConf.js';
 import { parseBoolean } from '../toolkit/utils/parseBoolean.js';
 import { readJsonAsync } from '../toolkit/utils/readJsonAsync.js';
 import { readJsonEnvVar } from '../toolkit/utils/readJsonEnvVar.js';
+import { rejectStagedNpmPackage } from '../toolkit/utils/rejectStagedNpmPackage.js';
 import { rewriteNpmManifest } from '../toolkit/utils/rewriteNpmManifest.js';
 import { rewriteStagedNpmPackagesSpecifiers } from '../toolkit/utils/rewriteStagedNpmPackagesSpecifiers.js';
 import { sortNpmsConfs } from '../toolkit/utils/sortNpmsConfs.js';
@@ -24,8 +27,7 @@ import { spawnAuthNpmAsync } from '../toolkit/utils/spawnAuthNpmAsync.js';
  * Publish configured packages in dependency order, to one or more registries per package.
  *
  * Each package's `registry` field determines which registries receive the publish.
- * The manifest's `publishConfig` and the auth token env var are derived from the
- * resolved registry entries.
+ * The manifest's `publishConfig` and the auth token env var are derived from the resolved registry entries.
  *
  * @param {string[]} argv
  * @returns {Promise<void>}
@@ -150,13 +152,33 @@ async function main(/* argv */) {
                 const packageJsonContents = `${JSON.stringify(rewrittenManifest, null, 4)}\n`;
                 await writeFile(path.join(stageDir, 'package.json'), packageJsonContents);
 
-                const isStagedPublish = (registryEntry.name === 'npmjs') && (target.stageToNpmjs ?? isStageToNpmjs);
-                const actionVerb = isStagedPublish ? 'Staging' : 'Publishing';
-                const stagingNote = isStagedPublish ? ' (for onsite approval)' : '';
+                const isNpmjsStaging = (registryEntry.name === 'npmjs') && (target.stageToNpmjs ?? isStageToNpmjs);
+                const actionVerb = isNpmjsStaging ? 'Staging' : 'Publishing';
+                const stagingNote = isNpmjsStaging ? ' (for onsite approval)' : '';
                 console.log(`\n${actionVerb} ${publishedName}@${manifestContents.version} to registry "${registryEntry.name}" (${registryEntry.url}) from ${pkgDir}${stagingNote}`);
 
+                let didOverrideStaged = false;
+                if (isNpmjsStaging) {
+                    const stagedPackages = await getStagedNpmPackages(publishedName, registryEntry, wsPath);
+                    const overlappingStages = findOverlappingStagedNpmPackages(stagedPackages, publishedName, manifestContents.version);
+
+                    if (overlappingStages.length > 0) {
+                        didOverrideStaged = true;
+                        for (const stageItem of overlappingStages) {
+                            console.log(`Version ${manifestContents.version} of ${publishedName} is already staged on npmjs (stage ID: ${stageItem.id}). Overriding by deleting the older staged version.`);
+                            if (isDryRun) {
+                                console.log(`[dry-run] Would reject staged package ${stageItem.id}`);
+                            }
+                            else {
+                                await rejectStagedNpmPackage(stageItem.id, registryEntry, wsPath);
+                                console.log(`Deleted older staged package ${stageItem.id}.`);
+                            }
+                        }
+                    }
+                }
+
                 // Pass `--no-include-workspace-root` defensively against `include-workspace-root=true` in `.npmrc`, which would otherwise target and publish the workspace root.
-                const subCommands = isStagedPublish ? ['stage', 'publish'] : ['publish'];
+                const subCommands = isNpmjsStaging ? ['stage', 'publish'] : ['publish'];
                 const npmArgs = [...subCommands, '--tag', tag, '--access', registryEntry.access, '--no-include-workspace-root'];
                 if (isDryRun) npmArgs.push('--dry-run');
 
@@ -174,7 +196,9 @@ async function main(/* argv */) {
                     },
                 );
 
-                const stagedSuffix = isStagedPublish ? ' [staged on npmjs; pending onsite approval]' : '';
+                const stagedSuffix = isNpmjsStaging
+                    ? ` [staged on npmjs${didOverrideStaged ? '; overridden older staged version' : ''}; pending onsite approval]`
+                    : '';
                 publishedRecords.push(`${publishedName}@${manifestContents.version} -> ${registryEntry.name} (${registryEntry.url})${stagedSuffix}`);
             }
             finally {

@@ -44,6 +44,8 @@ Publish to public `npmjs`, private GitHub Packages (`ghp`), or both concurrently
 
 By default, packages targeting `npmjs` are staged via `npm stage publish` (`stage_to_npmjs: 'true'`), deferring proof-of-presence (2FA) and publication to an onsite review step on [npmjs.com](https://www.npmjs.com) (under the "Staged Packages" tab) or via CLI with `npm stage approve <stage-id>`.
 
+If a package version being staged overlaps an already staged one on `npmjs`, the action automatically overrides the older staged version by deleting (rejecting) it before staging the new version.
+
 To release without an approval step, set `stage_to_npmjs: 'false'` (or `"stageToNpmjs": false` per package in `targets_json`).
 
 ## Inputs

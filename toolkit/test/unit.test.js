@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 
+import { findOverlappingStagedNpmPackages } from '../utils/findOverlappingStagedNpmPackages.js';
 import { normalizeNpmsConf } from '../utils/normalizeNpmsConf.js';
 import { parseBoolean } from '../utils/parseBoolean.js';
 import { resolveNpmRegistries, resolveNpmRegistryEntry } from '../utils/resolveNpmRegistries.js';
@@ -183,5 +184,63 @@ describe('parseBoolean', () => {
         assert.equal(parseBoolean('false', true), false);
         assert.equal(parseBoolean('0', true), false);
         assert.equal(parseBoolean(false, true), false);
+    });
+});
+
+describe('findOverlappingStagedNpmPackages', () => {
+    test('returns empty array when input is not an array or is empty', () => {
+        assert.deepEqual(findOverlappingStagedNpmPackages(null, 'pkg-a', '1.0.0'), []);
+        assert.deepEqual(findOverlappingStagedNpmPackages(undefined, 'pkg-a', '1.0.0'), []);
+        assert.deepEqual(findOverlappingStagedNpmPackages([], 'pkg-a', '1.0.0'), []);
+    });
+
+    test('matches exact version and package name', () => {
+        const stagedList = [
+            { id: 'uuid-1', packageName: 'pkg-a', version: '1.0.0' },
+            { id: 'uuid-2', packageName: 'pkg-a', version: '1.0.1' },
+            { id: 'uuid-3', packageName: 'pkg-b', version: '1.0.0' },
+        ];
+        const result = findOverlappingStagedNpmPackages(stagedList, 'pkg-a', '1.0.0');
+        assert.equal(result.length, 1);
+        assert.equal(result[0].id, 'uuid-1');
+    });
+
+    test('matches semver-equivalent versions (e.g. 1.0.0 vs v1.0.0)', () => {
+        const stagedList = [
+            { id: 'uuid-1', packageName: 'pkg-a', version: 'v1.0.0' },
+        ];
+        const result = findOverlappingStagedNpmPackages(stagedList, 'pkg-a', '1.0.0');
+        assert.equal(result.length, 1);
+        assert.equal(result[0].id, 'uuid-1');
+    });
+
+    test('matches scoped package names and handles package/name property aliases', () => {
+        const stagedList = [
+            { id: 'uuid-1', package: '@scope/pkg-a', version: '2.0.0' },
+            { id: 'uuid-2', name: '@scope/pkg-b', version: '2.0.0' },
+        ];
+        const resultA = findOverlappingStagedNpmPackages(stagedList, '@scope/pkg-a', '2.0.0');
+        assert.equal(resultA.length, 1);
+        assert.equal(resultA[0].id, 'uuid-1');
+
+        const resultB = findOverlappingStagedNpmPackages(stagedList, '@scope/pkg-b', '2.0.0');
+        assert.equal(resultB.length, 1);
+        assert.equal(resultB[0].id, 'uuid-2');
+    });
+
+    test('ignores non-matching versions or different packages', () => {
+        const stagedList = [
+            { id: 'uuid-1', packageName: 'pkg-a', version: '1.0.1' },
+            { id: 'uuid-2', packageName: 'pkg-other', version: '1.0.0' },
+        ];
+        const result = findOverlappingStagedNpmPackages(stagedList, 'pkg-a', '1.0.0');
+        assert.deepEqual(result, []);
+    });
+
+    test('safely handles non-object entries in staged list', () => {
+        const stagedList = [null, undefined, 'bad-entry', { id: 'uuid-1', packageName: 'pkg-a', version: '1.0.0' }];
+        const result = findOverlappingStagedNpmPackages(stagedList, 'pkg-a', '1.0.0');
+        assert.equal(result.length, 1);
+        assert.equal(result[0].id, 'uuid-1');
     });
 });

@@ -39,6 +39,7 @@ Because GitHub Actions checks out the complete action repository when an externa
   - `writeResolvedNpmVersions.js`: Writes bumped versions to package manifests and lockfiles.
   - `sortNpmsConfs.js`: Topologically sorts publishable packages according to internal dependency graphs.
   - `hasTrackedPathsChangedSinceGitRef.js` & `hasNpmPackageChanged.js`: Detects if source code or build artifacts changed compared to published releases.
+  - `getStagedNpmPackages.js`, `findOverlappingStagedNpmPackages.js`, & `rejectStagedNpmPackage.js`: Inspects and deletes staged package versions on npmjs for override resolution.
 
 ## Testing
 

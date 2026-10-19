@@ -135,7 +135,7 @@ export async function spawnAuthNpmAsync(
     const resolvedRegistryEntry = tokenVar
         ? { ...intermediateRegistryEntry, tokenVar }
         : intermediateRegistryEntry;
-    const isPublishCommand = args[0] === 'publish';
+    const isPublishCommand = (args[0] === 'publish') || (args[0] === 'stage');
 
     // Parse `NPMRC_SECRETS` from the workflow step's env and return them as an env patch for npm child processes.
     // Note: I've previously tried writing a temporary `.npmrc` file, with placeholders already populated with respective secret values, then passing this file to `npm install` via `--userconfig=/tmp/.my-temp-npmrc`. That approach failed when the repository already contained `.npmrc`, since "per-project" configs have higher priority than "per-user" config (see https://docs.npmjs.com/cli/v11/using-npm/config#npmrc-files).
