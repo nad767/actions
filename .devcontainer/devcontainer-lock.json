@@ -15,20 +15,20 @@
       "resolved": "ghcr.io/devcontainers-extra/features/ripgrep@sha256:0dfc0ac16f0d6aa754d006a138fd4cb4a62c245d308306edf8ad1b7a80b8fdf2",
       "integrity": "sha256:0dfc0ac16f0d6aa754d006a138fd4cb4a62c245d308306edf8ad1b7a80b8fdf2"
     },
-    "ghcr.io/devcontainers/features/node:2.1.0": {
-      "version": "2.1.0",
-      "resolved": "ghcr.io/devcontainers/features/node@sha256:586c9a6f7dd40bd3ba2cd41e7f2f88dcc31fbe5d1442afcbf07ffbc66b686857",
-      "integrity": "sha256:586c9a6f7dd40bd3ba2cd41e7f2f88dcc31fbe5d1442afcbf07ffbc66b686857"
+    "ghcr.io/devcontainers/features/node:2.1.1": {
+      "version": "2.1.1",
+      "resolved": "ghcr.io/devcontainers/features/node@sha256:2a19d3b0b3879437637cfd292eb29fee0afcfbe6364e33db9afc4f80c5c1f956",
+      "integrity": "sha256:2a19d3b0b3879437637cfd292eb29fee0afcfbe6364e33db9afc4f80c5c1f956"
     },
     "ghcr.io/nad767/features/better-persistence:0.0.5": {
       "version": "0.0.5",
       "resolved": "ghcr.io/nad767/features/better-persistence@sha256:229de365140e8be3933448b6497d8067878cec329f24d1e8236028cace9d7033",
       "integrity": "sha256:229de365140e8be3933448b6497d8067878cec329f24d1e8236028cace9d7033"
     },
-    "ghcr.io/nad767/features/cdp-proxy:0.0.19": {
-      "version": "0.0.19",
-      "resolved": "ghcr.io/nad767/features/cdp-proxy@sha256:4ee103aab362ef5631d4ab50f6e6e6c255a2c5f1b8857c1116f9dd46147e57c6",
-      "integrity": "sha256:4ee103aab362ef5631d4ab50f6e6e6c255a2c5f1b8857c1116f9dd46147e57c6"
+    "ghcr.io/nad767/features/cdp-proxy:0.0.20": {
+      "version": "0.0.20",
+      "resolved": "ghcr.io/nad767/features/cdp-proxy@sha256:a11fe308206c1f73424033145ba754dcd20f70ead77aba28609ff4120c0529b1",
+      "integrity": "sha256:a11fe308206c1f73424033145ba754dcd20f70ead77aba28609ff4120c0529b1"
     },
     "ghcr.io/nad767/features/config-git:0.0.46": {
       "version": "0.0.46",

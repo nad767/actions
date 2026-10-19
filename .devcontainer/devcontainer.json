@@ -6,7 +6,7 @@
         "ghcr.io/aqua/devcontainer-antigravity-cli/antigravity-cli:1.0.2": { },
 
         // Install nodejs and npm.
-        "ghcr.io/devcontainers/features/node:2.1.0": {
+        "ghcr.io/devcontainers/features/node:2.1.1": {
             "version": "26.10.0",
             "npmVersion": "12.2.0"
         },
@@ -35,7 +35,7 @@
             "excludes": "node_modules,.logs",
             "monoliths": ".git"
         },
-        "ghcr.io/nad767/features/cdp-proxy:0.0.19": {
+        "ghcr.io/nad767/features/cdp-proxy:0.0.20": {
             "logsDir": ".logs"
         }
     },
