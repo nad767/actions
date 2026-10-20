@@ -178,8 +178,9 @@ async function main(/* argv */) {
                 }
 
                 // Pass `--no-include-workspace-root` defensively against `include-workspace-root=true` in `.npmrc`, which would otherwise target and publish the workspace root.
+                // Pass `--loglevel=warn` to suppress verbose file-by-file tarball manifests (`npm notice`) while preserving errors and warnings.
                 const subCommands = isNpmjsStaging ? ['stage', 'publish'] : ['publish'];
-                const npmArgs = [...subCommands, '--tag', tag, '--access', registryEntry.access, '--no-include-workspace-root'];
+                const npmArgs = [...subCommands, '--tag', tag, '--access', registryEntry.access, '--no-include-workspace-root', '--loglevel=warn'];
                 if (isDryRun) npmArgs.push('--dry-run');
 
                 const publishedScope = publishedName.startsWith('@')

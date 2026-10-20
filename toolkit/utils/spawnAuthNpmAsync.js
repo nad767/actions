@@ -9,64 +9,83 @@ import { findNpmProjectRoot } from './findNpmProjectRoot.js';
 import { resolveNpmRegistries } from './resolveNpmRegistries.js';
 import { spawnAsync } from './spawnAsync.js';
 
-const ANSI_GRAY = '\u{1B}[90m';
-const ANSI_GREEN = '\u{1B}[32m';
-const ANSI_STRIKETHROUGH = '\u{1B}[9m';
-const ANSI_RESET = '\u{1B}[0m';
+export const ANSI_RED = '\u{1B}[31m';
+export const ANSI_GREEN = '\u{1B}[32m';
+export const ANSI_RESET = '\u{1B}[0m';
 
 /**
- * Format `.npmrc` line entries for logging, annotating environment variable placeholders with resolution status.
- * Replaced lines are rendered with ANSI strikethrough, and replacement/added lines are highlighted in green.
+ * Tokenize a line for word-boundary diffing.
  *
- * @param {Array<{ type: 'unchanged', line: string } | { type: 'replaced', oldLine: string, newLine: string } | { type: 'added', newLine: string }>} entries
- * @param {Record<string, string>} npmEnv
+ * @param {string} str
+ * @returns {string[]}
+ */
+export function tokenizeDiffLine(str) {
+    return str.split(/(\b|[^a-zA-Z0-9_])/u).filter(Boolean);
+}
+
+/**
+ * Produce a compact inline diff between two lines, highlighting removed characters
+ * in ANSI red and added characters in ANSI green.
+ *
+ * @param {string} oldLine
+ * @param {string} newLine
  * @returns {string}
  */
-function formatNpmrcLogBlock(entries, npmEnv) {
-    const annotatePlaceholders = str => str.replaceAll(
-        /\$\{([^}]+)\}/gu,
-        (_, envVarName) => `\${${envVarName} ${Object.hasOwn(npmEnv, envVarName) ? '✅' : '❌'}}`,
-    );
+export function formatInlineDiff(oldLine, newLine) {
+    const oldTokens = tokenizeDiffLine(oldLine);
+    const newTokens = tokenizeDiffLine(newLine);
 
+    let start = 0;
+    while (start < oldTokens.length && start < newTokens.length && oldTokens[start] === newTokens[start]) {
+        start++;
+    }
+
+    let oldEnd = oldTokens.length - 1;
+    let newEnd = newTokens.length - 1;
+    while (oldEnd >= start && newEnd >= start && oldTokens[oldEnd] === newTokens[newEnd]) {
+        oldEnd--;
+        newEnd--;
+    }
+
+    const prefix = oldTokens.slice(0, start).join('');
+    const removed = oldTokens.slice(start, oldEnd + 1).join('');
+    const added = newTokens.slice(start, newEnd + 1).join('');
+    const suffix = oldTokens.slice(oldEnd + 1).join('');
+
+    let result = prefix;
+    if (removed) result += `${ANSI_RED}${removed}${ANSI_RESET}`;
+    if (added) result += `${ANSI_GREEN}${added}${ANSI_RESET}`;
+    result += suffix;
+    return result;
+}
+
+/**
+ * Format `.npmrc` modifications into compact log lines.
+ * Replaced lines show an inline diff, while added lines are highlighted in green.
+ *
+ * @param {Array<{ type: 'replaced', oldLine: string, newLine: string } | { type: 'added', newLine: string }>} entries
+ * @returns {string}
+ */
+export function formatNpmrcDiff(entries) {
     const formattedLines = [];
 
     for (const entry of entries) {
-        switch (entry.type) {
-            case 'unchanged': {
-                // `.npmrc` comments start with `#` or `;` and end with EOL. They can be in their own line, or trailing after a config entry. See https://docs.npmjs.com/cli/v11/configuring-npm/npmrc#comments.
-                const lineStripped = entry.line.replace(/\s*[#;].*$/u, '');
-                if (lineStripped.trim() !== '') {
-                    formattedLines.push(`  ${ANSI_GRAY}${annotatePlaceholders(lineStripped)}${ANSI_RESET}`);
-                }
-                break;
+        if (entry.type === 'replaced') {
+            const oldLineStripped = entry.oldLine.replace(/\s*[#;].*$/u, '');
+            const newLineStripped = entry.newLine.replace(/\s*[#;].*$/u, '');
+            if (oldLineStripped.trim() !== '' || newLineStripped.trim() !== '') {
+                formattedLines.push(formatInlineDiff(oldLineStripped, newLineStripped));
             }
-            case 'replaced': {
-                const oldLineStripped = entry.oldLine.replace(/\s*[#;].*$/u, '');
-                const newLineStripped = entry.newLine.replace(/\s*[#;].*$/u, '');
-                if (oldLineStripped.trim() !== '') {
-                    formattedLines.push(`  ${ANSI_STRIKETHROUGH}${ANSI_GRAY}${annotatePlaceholders(oldLineStripped)}${ANSI_RESET}`);
-                }
-                if (newLineStripped.trim() !== '') {
-                    formattedLines.push(`  ${ANSI_GREEN}${annotatePlaceholders(newLineStripped)}${ANSI_RESET}`);
-                }
-                break;
+        }
+        else if (entry.type === 'added') {
+            const newLineStripped = entry.newLine.replace(/\s*[#;].*$/u, '');
+            if (newLineStripped.trim() !== '') {
+                formattedLines.push(`${ANSI_GREEN}${newLineStripped}${ANSI_RESET}`);
             }
-            case 'added': {
-                const newLineStripped = entry.newLine.replace(/\s*[#;].*$/u, '');
-                if (newLineStripped.trim() !== '') {
-                    formattedLines.push(`  ${ANSI_GREEN}${annotatePlaceholders(newLineStripped)}${ANSI_RESET}`);
-                }
-                break;
-            }
-            // no-default-case
         }
     }
 
-    const annotatedNpmrcContents = formattedLines.join('\n');
-
-    return (annotatedNpmrcContents !== '')
-        ? annotatedNpmrcContents
-        : `${ANSI_GRAY}<empty after stripping comments>${ANSI_RESET}`;
+    return formattedLines.join('\n');
 }
 
 /**
@@ -151,8 +170,8 @@ export async function spawnAuthNpmAsync(
                 line.slice(separatorIdx + 1).trim(),
             ];
         });
-    console.debug(`Received ${parsedNpmSecretsEntries.length} \`NPMRC_SECRETS\` entries for npm child process env patches.`);
     if (parsedNpmSecretsEntries.length > 0) {
+        console.debug(`Received ${parsedNpmSecretsEntries.length} \`NPMRC_SECRETS\` entries for npm child process env patches.`);
         console.debug(
             parsedNpmSecretsEntries
                 .map(([key, value]) => `  ${key}: ${value.slice(0, 8)}${'*'.repeat(Math.max(0, value.length - 8))}`)
@@ -168,8 +187,8 @@ export async function spawnAuthNpmAsync(
     });
 
     const npmrcLines = npmrcContents?.split(/\r?\n/u) ?? [];
-    /** @type {Array<{ type: 'unchanged', line: string } | { type: 'replaced', oldLine: string, newLine: string } | { type: 'added', newLine: string }>} */
-    const logEntries = npmrcLines.map(line => ({ line, type: 'unchanged' }));
+    /** @type {Array<{ type: 'replaced', oldLine: string, newLine: string } | { type: 'added', newLine: string }>} */
+    const diffEntries = [];
 
     // Reconcile the scope mapping and registry auth in-place so we preserve unrelated config from the caller repository.
     const scopedRegistryAnyValueRegex = new RegExp(String.raw`^\s*@${RegExp.escape(resolvedGhpScope)}:registry\s*=`, 'u');
@@ -205,27 +224,19 @@ export async function spawnAuthNpmAsync(
     // Check for the existence of a scoped-registry mapping for the target scope, and add/update it if needed.
     const scopedRegistryExactLine = `@${resolvedGhpScope}:registry=${resolvedRegistryEntry.url}`;
     if (scopedRegistryMappingLineIdx === -1) {
-        console.debug(`No @${resolvedGhpScope} registry mapping found in ${resolvedNpmrcPath}; appending one.`);
         npmrcLines.push(scopedRegistryExactLine);
-        logEntries.push({ newLine: scopedRegistryExactLine, type: 'added' });
+        diffEntries.push({ newLine: scopedRegistryExactLine, type: 'added' });
         didRewriteNpmrc = true;
     }
     else if (!isScopedRegistryMappingExact) {
-        console.debug(`Rewriting the @${resolvedGhpScope} registry mapping in ${resolvedNpmrcPath} to ${resolvedRegistryEntry.url}.`);
         const oldLine = npmrcLines[scopedRegistryMappingLineIdx];
         npmrcLines[scopedRegistryMappingLineIdx] = scopedRegistryExactLine;
-        logEntries[scopedRegistryMappingLineIdx] = { newLine: scopedRegistryExactLine, oldLine, type: 'replaced' };
+        diffEntries.push({ newLine: scopedRegistryExactLine, oldLine, type: 'replaced' });
         didRewriteNpmrc = true;
-    }
-    else {
-        console.debug(`Found an existing @${resolvedGhpScope} registry mapping in ${resolvedNpmrcPath}; leaving it unchanged.`);
     }
 
     // Check for the existence of an auth token entry for the target registry, and add/update it if needed.
-    if (isRegistryAuthTokenResolvable) {
-        console.debug(`Found a resolvable authToken entry for ${resolvedRegistryEntry.canon} in ${resolvedNpmrcPath}; leaving it unchanged.`);
-    }
-    else {
+    if (!isRegistryAuthTokenResolvable) {
         const registryAuthExactLine = `//${resolvedRegistryEntry.canon}/:_authToken=\${${resolvedRegistryEntry.tokenVar}}`;
         const tokenValue = npmEnv[resolvedRegistryEntry.tokenVar];
 
@@ -238,16 +249,14 @@ export async function spawnAuthNpmAsync(
             }
         }
         else if (registryAuthTokenLineIdx === -1) {
-            console.debug(`No authToken entry for ${resolvedRegistryEntry.canon} found in \`${resolvedNpmrcPath}\`; appending a \`${registryAuthExactLine}\` fallback.`);
             npmrcLines.push(registryAuthExactLine);
-            logEntries.push({ newLine: registryAuthExactLine, type: 'added' });
+            diffEntries.push({ newLine: registryAuthExactLine, type: 'added' });
             didRewriteNpmrc = true;
         }
         else {
-            console.debug(`Found an unresolvable authToken entry for ${resolvedRegistryEntry.canon} in \`${resolvedNpmrcPath}\`; replacing it with \`${registryAuthExactLine}\`.`);
             const oldLine = npmrcLines[registryAuthTokenLineIdx];
             npmrcLines[registryAuthTokenLineIdx] = registryAuthExactLine;
-            logEntries[registryAuthTokenLineIdx] = { newLine: registryAuthExactLine, oldLine, type: 'replaced' };
+            diffEntries.push({ newLine: registryAuthExactLine, oldLine, type: 'replaced' });
             didRewriteNpmrc = true;
         }
     }
@@ -256,30 +265,10 @@ export async function spawnAuthNpmAsync(
         const patchedNpmrcContents = `${npmrcLines.join('\n').replace(/\n*$/u, '')}\n`;
 
         await writeFile(resolvedNpmrcPath, patchedNpmrcContents);
-        console.debug(`Wrote temporary registry auth changes to \`${resolvedNpmrcPath}\`.`);
-    }
-
-    // Log the `.npmrc` content with annotations indicating whether env var placeholders are resolvable, to help debugging potential auth issues during install.
-    console.debug(`Inspecting \`${resolvedNpmrcPath}\` for @${resolvedGhpScope} registry auth.`);
-    if (npmrcContents !== null) {
-        const header = didRewriteNpmrc
-            ? 'Patched "per-project" `.npmrc` (comments stripped):'
-            : 'Existing "per-project" `.npmrc` (comments stripped):';
-        console.debug([
-            header,
-            formatNpmrcLogBlock(logEntries, npmEnv),
-            '',
-        ].join('\n'));
-    }
-    else if (didRewriteNpmrc) {
-        console.debug([
-            'Created temporary "per-project" `.npmrc` (comments stripped):',
-            formatNpmrcLogBlock(logEntries, npmEnv),
-            '',
-        ].join('\n'));
-    }
-    else {
-        console.debug('No "per-project" `.npmrc` found; proceeding without creating one.');
+        const diffLog = formatNpmrcDiff(diffEntries);
+        if (diffLog) {
+            console.debug(diffLog);
+        }
     }
 
     return spawnAsync( // Or `return await ...` - there's no actual difference.

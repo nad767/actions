@@ -6,6 +6,14 @@ import { normalizeNpmsConf } from '../utils/normalizeNpmsConf.js';
 import { parseBoolean } from '../utils/parseBoolean.js';
 import { resolveNpmRegistries, resolveNpmRegistryEntry } from '../utils/resolveNpmRegistries.js';
 import { rewriteNpmPackageName } from '../utils/rewriteNpmPackageName.js';
+import {
+    ANSI_GREEN,
+    ANSI_RED,
+    ANSI_RESET,
+    formatInlineDiff,
+    formatNpmrcDiff,
+    tokenizeDiffLine,
+} from '../utils/spawnAuthNpmAsync.js';
 
 describe('rewriteNpmPackageName', () => {
     test('leaves unscoped package name unchanged when no overrides or default scope provided', () => {
@@ -242,5 +250,63 @@ describe('findOverlappingStagedNpmPackages', () => {
         const result = findOverlappingStagedNpmPackages(stagedList, 'pkg-a', '1.0.0');
         assert.equal(result.length, 1);
         assert.equal(result[0].id, 'uuid-1');
+    });
+});
+
+describe('spawnAuthNpmAsync diff logging', () => {
+    test('tokenizeDiffLine preserves original string when tokens joined', () => {
+        const line = '//npm.pkg.github.com/:_authToken=${GH_CLASSIC_PAT_NAD767_PACKAGES_READ}';
+        const tokens = tokenizeDiffLine(line);
+        assert.equal(tokens.join(''), line);
+    });
+
+    test('formatInlineDiff renders variable replacement with red removal and green addition', () => {
+        const oldLine = '//npm.pkg.github.com/:_authToken=${GH_CLASSIC_PAT_NAD767_PACKAGES_READ}';
+        const newLine = '//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}';
+        const result = formatInlineDiff(oldLine, newLine);
+        assert.equal(
+            result,
+            `//npm.pkg.github.com/:_authToken=\${${ANSI_RED}GH_CLASSIC_PAT_NAD767_PACKAGES_READ${ANSI_RESET}${ANSI_GREEN}GITHUB_TOKEN${ANSI_RESET}}`,
+        );
+    });
+
+    test('formatInlineDiff renders registry URL rewrite with red removal and green addition', () => {
+        const oldLine = '@nad767:registry=https://npm.pkg.github.com';
+        const newLine = '@nad767:registry=https://registry.npmjs.org/';
+        const result = formatInlineDiff(oldLine, newLine);
+        assert.equal(
+            result,
+            `@nad767:registry=https://${ANSI_RED}npm.pkg.github.com${ANSI_RESET}${ANSI_GREEN}registry.npmjs.org/${ANSI_RESET}`,
+        );
+    });
+
+    test('formatNpmrcDiff formats replaced and added entries cleanly', () => {
+        const entries = [
+            {
+                newLine: '@nad767:registry=https://registry.npmjs.org/',
+                oldLine: '@nad767:registry=https://npm.pkg.github.com # existing mapping',
+                type: 'replaced',
+            },
+            {
+                newLine: '//registry.npmjs.org/:_authToken=${NPMJS_TOKEN}',
+                type: 'added',
+            },
+        ];
+        const output = formatNpmrcDiff(entries);
+        const lines = output.split('\n');
+
+        assert.equal(lines.length, 2);
+        assert.equal(
+            lines[0],
+            `@nad767:registry=https://${ANSI_RED}npm.pkg.github.com${ANSI_RESET}${ANSI_GREEN}registry.npmjs.org/${ANSI_RESET}`,
+        );
+        assert.equal(
+            lines[1],
+            `${ANSI_GREEN}//registry.npmjs.org/:_authToken=\${NPMJS_TOKEN}${ANSI_RESET}`,
+        );
+    });
+
+    test('formatNpmrcDiff returns empty string when no entries', () => {
+        assert.equal(formatNpmrcDiff([]), '');
     });
 });
