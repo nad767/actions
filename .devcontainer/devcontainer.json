@@ -34,9 +34,6 @@
             "clonedWorkspace": "/workspaceCloned",
             "excludes": "node_modules,.logs",
             "monoliths": ".git"
-        },
-        "ghcr.io/nad767/features/cdp-proxy:0.0.20": {
-            "logsDir": ".logs"
         }
     },
     "customizations": {

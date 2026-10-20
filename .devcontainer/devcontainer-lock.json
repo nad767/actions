@@ -25,11 +25,6 @@
       "resolved": "ghcr.io/nad767/features/better-persistence@sha256:229de365140e8be3933448b6497d8067878cec329f24d1e8236028cace9d7033",
       "integrity": "sha256:229de365140e8be3933448b6497d8067878cec329f24d1e8236028cace9d7033"
     },
-    "ghcr.io/nad767/features/cdp-proxy:0.0.20": {
-      "version": "0.0.20",
-      "resolved": "ghcr.io/nad767/features/cdp-proxy@sha256:a11fe308206c1f73424033145ba754dcd20f70ead77aba28609ff4120c0529b1",
-      "integrity": "sha256:a11fe308206c1f73424033145ba754dcd20f70ead77aba28609ff4120c0529b1"
-    },
     "ghcr.io/nad767/features/config-git:0.0.46": {
       "version": "0.0.46",
       "resolved": "ghcr.io/nad767/features/config-git@sha256:a1baadf8d2afe81e948dcc5302bb28351873157dc51564f11792bf55803b2b6f",
