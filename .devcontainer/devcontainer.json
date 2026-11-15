@@ -48,6 +48,7 @@
                 "mutantdino.resourcemonitor",
                 "redhat.vscode-xml",
                 "redhat.vscode-yaml",
+                "rioj7.command-variable", // For `ctrl+q` keybind to antigravity context in the global `keybindings.json`. This will become redundant if antigravity plugin ever introduces a command for attaching a file to context without specific lines.
                 "salesforce.sfdocs-markdown-assistant"
             ]
         }
