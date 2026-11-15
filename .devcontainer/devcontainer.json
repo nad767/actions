@@ -6,9 +6,9 @@
         "ghcr.io/aqua/devcontainer-antigravity-cli/antigravity-cli:1.0.2": { },
 
         // Install nodejs and npm.
-        "ghcr.io/devcontainers/features/node:2.1.1": {
-            "version": "26.10.0",
-            "npmVersion": "12.2.0"
+        "ghcr.io/devcontainers/features/node:2.1.2": {
+            "version": "26.13.1",
+            "npmVersion": "12.2.2"
         },
 
         // Install `direnv` to load `.envrc` files (and in turn `.env` files) into the shell environment, so they can be seen by `.npmrc`.
