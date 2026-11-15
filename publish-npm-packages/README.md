@@ -63,7 +63,6 @@ To release without an approval step, set `stage_to_npmjs: 'false'` (or `"stageTo
 | `disable_prune_by_git_diff` | Skip the prune-by-git-diff check. | `'false'` | No |
 | `disable_prune_by_build_diff` | Skip the prune-by-build-diff check. | `'false'` | No |
 | `node_version` | Node.js version used for execution. | `'26'` | No |
-| `npmrc_secrets` | Optional newline-delimited `KEY=VALUE` pairs exposed to `.npmrc`. | - | No |
 
 ## `targets_json` Schema
 

@@ -30,6 +30,7 @@ export async function rejectStagedNpmPackage(stageId, registryEntry, cwd) {
                 childProcess.stdout.pipe(stdoutStreamableBuffer.stream);
                 childProcess.stderr.pipe(stderrStreamableBuffer.stream);
             },
+            preferActionToken: true,
             registryEntry,
             stdio: ['ignore', 'pipe', 'pipe'],
         },

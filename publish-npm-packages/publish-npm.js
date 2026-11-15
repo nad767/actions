@@ -190,10 +190,11 @@ async function main(/* argv */) {
                 await spawnAuthNpmAsync(
                     npmArgs,
                     {
-                        cwd:      stageDir,
-                        ghpScope: publishedScope ?? ghpScope,
+                        cwd:               stageDir,
+                        ghpScope:          publishedScope ?? ghpScope,
+                        preferActionToken: true,
                         registryEntry,
-                        stdio:    'inherit',
+                        stdio:             'inherit',
                     },
                 );
 

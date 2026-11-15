@@ -89,6 +89,117 @@ export function formatNpmrcDiff(entries) {
 }
 
 /**
+ * Reconcile a project's `.npmrc` contents with the required scoped registry mapping and auth token.
+ *
+ * @param {object} options
+ * @param {string} options.ghpScope
+ * @param {boolean} [options.isPublishCommand=false]
+ * @param {string | null} options.npmrcContents
+ * @param {NodeJS.ProcessEnv} options.npmEnv
+ * @param {string} options.npmrcPath
+ * @param {boolean} [options.preferActionToken=false]
+ * @param {import('./npmRegistries.js').NpmRegistryEntry} options.registryEntry
+ * @returns {{
+ *     didRewriteNpmrc: boolean,
+ *     diffEntries: Array<{ type: 'replaced', oldLine: string, newLine: string } | { type: 'added', newLine: string }>,
+ *     patchedNpmrcContents: string | null,
+ * }}
+ */
+export function reconcileNpmrcContents({
+    ghpScope,
+    isPublishCommand = false,
+    npmrcContents,
+    npmEnv,
+    npmrcPath,
+    preferActionToken = false,
+    registryEntry,
+}) {
+
+    const npmrcLines = npmrcContents?.split(/\r?\n/u) ?? [];
+    /** @type {Array<{ type: 'replaced', oldLine: string, newLine: string } | { type: 'added', newLine: string }>} */
+    const diffEntries = [];
+
+    // Reconcile the scope mapping and registry auth in-place so we preserve unrelated config from the caller repository.
+    const scopedRegistryAnyValueRegex = new RegExp(String.raw`^\s*@${RegExp.escape(ghpScope)}:registry\s*=`, 'u');
+    const registryUrlRegex = new RegExp(String.raw`^\s*https://?${RegExp.escape(registryEntry.canon)}/?`, 'u'); // Matches the registry URL with any protocol and optional subdomain, to allow some flexibility in existing config.
+    const registryAuthTokenRegex = new RegExp(String.raw`^\s*(?:https:)?//${RegExp.escape(registryEntry.canon)}/?:_authToken\s*=`, 'u'); // `(?:https:)?//` is an optional non-capturing group, because both `//registry.example.com/:_authToken=xxx` and `https://registry.example.com/:_authToken=xxx` are valid npmrc entries for registry auth.
+    let scopedRegistryMappingLineIdx = -1;
+    let isScopedRegistryMappingExact = false;
+    let registryAuthTokenLineIdx = -1;
+    let isRegistryAuthTokenResolvable = false;
+
+    for (const [lineIdx, line] of npmrcLines.entries()) {
+        const lineNoComments = line.replace(/[#;].*$/u, ''); // Strip comments prior to avoid regex false positives on commented-out config lines.
+        if (scopedRegistryAnyValueRegex.test(lineNoComments)) {
+            scopedRegistryMappingLineIdx = lineIdx;
+            const separatorIdx = lineNoComments.indexOf('=');
+            const scopedRegistryValue = (separatorIdx !== -1) ? lineNoComments.slice(separatorIdx + 1).trim() : '';
+            isScopedRegistryMappingExact = registryUrlRegex.test(scopedRegistryValue);
+        }
+        if (registryAuthTokenRegex.test(lineNoComments)) {
+            registryAuthTokenLineIdx = lineIdx;
+            const separatorIdx = line.indexOf('=');
+            const registryAuthTokenValue = (separatorIdx !== -1) ? line.slice(separatorIdx + 1).trim() : '';
+            const registryAuthTokenValuePlaceholders = registryAuthTokenValue.matchAll(/\$\{([^}]+)\}/gu).toArray();
+            // Note that if `registryAuthTokenValuePlaceholders` is an empty array (i.e. no placeholders, i.e. hardcoded auth token), `every` will return `true`, which is the desired behavior since it means the value is already resolvable as-is.
+            if (registryAuthTokenValuePlaceholders.every(([, envVarName]) => Object.hasOwn(npmEnv, envVarName))) {
+                isRegistryAuthTokenResolvable = true;
+            }
+        }
+    }
+
+    let didRewriteNpmrc = false;
+
+    // Check for the existence of a scoped-registry mapping for the target scope, and add/update it if needed.
+    const scopedRegistryExactLine = `@${ghpScope}:registry=${registryEntry.url}`;
+    if (scopedRegistryMappingLineIdx === -1) {
+        npmrcLines.push(scopedRegistryExactLine);
+        diffEntries.push({ newLine: scopedRegistryExactLine, type: 'added' });
+        didRewriteNpmrc = true;
+    }
+    else if (!isScopedRegistryMappingExact) {
+        const oldLine = npmrcLines[scopedRegistryMappingLineIdx];
+        npmrcLines[scopedRegistryMappingLineIdx] = scopedRegistryExactLine;
+        diffEntries.push({ newLine: scopedRegistryExactLine, oldLine, type: 'replaced' });
+        didRewriteNpmrc = true;
+    }
+
+    // Check for the existence of an auth token entry for the target registry, and add/update it if needed.
+    const registryAuthExactLine = `//${registryEntry.canon}/:_authToken=\${${registryEntry.tokenVar}}`;
+    const tokenValue = npmEnv[registryEntry.tokenVar];
+    const hasActionToken = (typeof tokenValue === 'string') && (tokenValue.length > 0);
+    const shouldWriteActionToken = (preferActionToken && hasActionToken) || !isRegistryAuthTokenResolvable;
+
+    if (shouldWriteActionToken) {
+        if (!hasActionToken) {
+            if ((registryEntry.name === 'npmjs') && !isPublishCommand) {
+                console.debug(`No ${registryEntry.tokenVar} provided for ${registryEntry.canon}; proceeding without injecting registry auth because public npm reads do not require it.`);
+            }
+            else {
+                throw new Error(`Missing \`${registryEntry.tokenVar}\` while patching \`${npmrcPath}\`. The fallback auth line uses \`${registryAuthExactLine}\`.`);
+            }
+        }
+        else if (registryAuthTokenLineIdx === -1) {
+            npmrcLines.push(registryAuthExactLine);
+            diffEntries.push({ newLine: registryAuthExactLine, type: 'added' });
+            didRewriteNpmrc = true;
+        }
+        else if (npmrcLines[registryAuthTokenLineIdx].trim() !== registryAuthExactLine) {
+            const oldLine = npmrcLines[registryAuthTokenLineIdx];
+            npmrcLines[registryAuthTokenLineIdx] = registryAuthExactLine;
+            diffEntries.push({ newLine: registryAuthExactLine, oldLine, type: 'replaced' });
+            didRewriteNpmrc = true;
+        }
+    }
+
+    return {
+        didRewriteNpmrc,
+        diffEntries,
+        patchedNpmrcContents: didRewriteNpmrc ? `${npmrcLines.join('\n').replace(/\n*$/u, '')}\n` : null,
+    };
+}
+
+/**
  * Create/patch a "per-project" `.npmrc` file, ensuring npm can authenticate to the target registry, then spawn the desired npm command as a child process with the appropriate env vars for auth. Finally, restore the original `.npmrc` content if it was modified.
  *
  * Motivation:
@@ -106,7 +217,7 @@ export function formatNpmrcDiff(entries) {
  * @param {NodeJS.ProcessEnv} [options.env=process.env] Environment variables for the child process.
  * @param {string} [options.ghpScope] GitHub Packages scope name (without leading `@`).
  * @param {string} [options.npmrcPath] Optional explicit path to the `.npmrc` file to create or patch.
- * @param {string} [options.npmrcSecrets] Multiline `KEY=VALUE` pairs of secrets to patch into the child process environment.
+ * @param {boolean} [options.preferActionToken=false] Whether to prefer the action's registry token over an existing resolvable `.npmrc` token (use `true` for writes).
  * @param {string} [options.registry] Target registry name or alias (e.g. `'ghp'`, `'npmjs'`).
  * @param {import('./npmRegistries.js').NpmRegistryEntry} [options.registryEntry] Target registry configuration entry.
  * @param {string} [options.tokenVar] Custom environment variable name holding the registry authentication token.
@@ -121,7 +232,7 @@ export async function spawnAuthNpmAsync(
         env = process.env, // Same as `spawn()`'s default.
         ghpScope,
         npmrcPath,
-        npmrcSecrets = env.NPMRC_SECRETS ?? '',
+        preferActionToken = false,
         registry,
         registryEntry,
         tokenVar,
@@ -154,116 +265,25 @@ export async function spawnAuthNpmAsync(
     const resolvedRegistryEntry = tokenVar
         ? { ...intermediateRegistryEntry, tokenVar }
         : intermediateRegistryEntry;
-    const isPublishCommand = (args[0] === 'publish') || (args[0] === 'stage');
-
-    // Parse `NPMRC_SECRETS` from the workflow step's env and return them as an env patch for npm child processes.
-    // Note: I've previously tried writing a temporary `.npmrc` file, with placeholders already populated with respective secret values, then passing this file to `npm install` via `--userconfig=/tmp/.my-temp-npmrc`. That approach failed when the repository already contained `.npmrc`, since "per-project" configs have higher priority than "per-user" config (see https://docs.npmjs.com/cli/v11/using-npm/config#npmrc-files).
-    const parsedNpmSecretsEntries = npmrcSecrets
-        .split(/\r?\n/u)
-        .map(line => line.trim())
-        .filter(Boolean)
-        .map(line => {
-            const separatorIdx = line.indexOf('=');
-            if (separatorIdx < 1) throw new Error(`Invalid \`NPMRC_SECRETS\` entry: ${line}. Expected KEY=VALUE.`);
-            return [
-                line.slice(0, separatorIdx).trim(),
-                line.slice(separatorIdx + 1).trim(),
-            ];
-        });
-    if (parsedNpmSecretsEntries.length > 0) {
-        console.debug(`Received ${parsedNpmSecretsEntries.length} \`NPMRC_SECRETS\` entries for npm child process env patches.`);
-        console.debug(
-            parsedNpmSecretsEntries
-                .map(([key, value]) => `  ${key}: ${value.slice(0, 8)}${'*'.repeat(Math.max(0, value.length - 8))}`)
-                .join('\n'),
-        );
-    }
 
     // Parse the `.npmrc` file (if it exists).
-    const npmEnv = { ...env, ...Object.fromEntries(parsedNpmSecretsEntries) };
     const npmrcContents = await readFile(resolvedNpmrcPath, 'utf8').catch(err => {
         if (err?.code === 'ENOENT') return null; // No "per-project" `.npmrc` file is a valid scenario.
         throw err;
     });
 
-    const npmrcLines = npmrcContents?.split(/\r?\n/u) ?? [];
-    /** @type {Array<{ type: 'replaced', oldLine: string, newLine: string } | { type: 'added', newLine: string }>} */
-    const diffEntries = [];
+    const isPublishCommand = (args[0] === 'publish') || (args[0] === 'stage');
+    const { didRewriteNpmrc, diffEntries, patchedNpmrcContents } = reconcileNpmrcContents({
+        ghpScope: resolvedGhpScope,
+        isPublishCommand,
+        npmEnv: env,
+        npmrcContents,
+        npmrcPath: resolvedNpmrcPath,
+        preferActionToken,
+        registryEntry: resolvedRegistryEntry,
+    });
 
-    // Reconcile the scope mapping and registry auth in-place so we preserve unrelated config from the caller repository.
-    const scopedRegistryAnyValueRegex = new RegExp(String.raw`^\s*@${RegExp.escape(resolvedGhpScope)}:registry\s*=`, 'u');
-    const registryUrlRegex = new RegExp(String.raw`^\s*https://?${RegExp.escape(resolvedRegistryEntry.canon)}/?`, 'u'); // Matches the registry URL with any protocol and optional subdomain, to allow some flexibility in existing config.
-    const registryAuthTokenRegex = new RegExp(String.raw`^\s*(?:https:)?//${RegExp.escape(resolvedRegistryEntry.canon)}/?:_authToken\s*=`, 'u'); // `(?:https:)?//` is an optional non-capturing group, because both `//registry.example.com/:_authToken=xxx` and `https://registry.example.com/:_authToken=xxx` are valid npmrc entries for registry auth.
-    let scopedRegistryMappingLineIdx = -1;
-    let isScopedRegistryMappingExact = false;
-    let registryAuthTokenLineIdx = -1;
-    let isRegistryAuthTokenResolvable = false;
-
-    for (const [lineIdx, line] of npmrcLines.entries()) {
-        const lineNoComments = line.replace(/[#;].*$/u, ''); // Strip comments prior to avoid regex false positives on commented-out config lines.
-        if (scopedRegistryAnyValueRegex.test(lineNoComments)) {
-            scopedRegistryMappingLineIdx = lineIdx;
-            const separatorIdx = lineNoComments.indexOf('=');
-            const scopedRegistryValue = (separatorIdx !== -1) ? lineNoComments.slice(separatorIdx + 1).trim() : '';
-            isScopedRegistryMappingExact = registryUrlRegex.test(scopedRegistryValue);
-        }
-        if (registryAuthTokenRegex.test(lineNoComments)) {
-            registryAuthTokenLineIdx = lineIdx;
-            const separatorIdx = line.indexOf('=');
-            const registryAuthTokenValue = (separatorIdx !== -1) ? line.slice(separatorIdx + 1).trim() : '';
-            const registryAuthTokenValuePlaceholders = registryAuthTokenValue.matchAll(/\$\{([^}]+)\}/gu).toArray();
-            // Note that if `registryAuthTokenValuePlaceholders` is an empty array (i.e. no placeholders, i.e. hardcoded auth token), `every` will return `true`, which is the desired behavior since it means the value is already resolvable as-is.
-            if (registryAuthTokenValuePlaceholders.every(([, envVarName]) => Object.hasOwn(npmEnv, envVarName))) {
-                isRegistryAuthTokenResolvable = true;
-            }
-        }
-    }
-
-    let didRewriteNpmrc = false;
-
-    // Check for the existence of a scoped-registry mapping for the target scope, and add/update it if needed.
-    const scopedRegistryExactLine = `@${resolvedGhpScope}:registry=${resolvedRegistryEntry.url}`;
-    if (scopedRegistryMappingLineIdx === -1) {
-        npmrcLines.push(scopedRegistryExactLine);
-        diffEntries.push({ newLine: scopedRegistryExactLine, type: 'added' });
-        didRewriteNpmrc = true;
-    }
-    else if (!isScopedRegistryMappingExact) {
-        const oldLine = npmrcLines[scopedRegistryMappingLineIdx];
-        npmrcLines[scopedRegistryMappingLineIdx] = scopedRegistryExactLine;
-        diffEntries.push({ newLine: scopedRegistryExactLine, oldLine, type: 'replaced' });
-        didRewriteNpmrc = true;
-    }
-
-    // Check for the existence of an auth token entry for the target registry, and add/update it if needed.
-    if (!isRegistryAuthTokenResolvable) {
-        const registryAuthExactLine = `//${resolvedRegistryEntry.canon}/:_authToken=\${${resolvedRegistryEntry.tokenVar}}`;
-        const tokenValue = npmEnv[resolvedRegistryEntry.tokenVar];
-
-        if ((typeof tokenValue !== 'string') || (tokenValue.length === 0)) {
-            if ((resolvedRegistryEntry.name === 'npmjs') && !isPublishCommand) {
-                console.debug(`No ${resolvedRegistryEntry.tokenVar} provided for ${resolvedRegistryEntry.canon}; proceeding without injecting registry auth because public npm reads do not require it.`);
-            }
-            else {
-                throw new Error(`Missing \`${resolvedRegistryEntry.tokenVar}\` while patching \`${resolvedNpmrcPath}\`. The fallback auth line uses \`${registryAuthExactLine}\`.`);
-            }
-        }
-        else if (registryAuthTokenLineIdx === -1) {
-            npmrcLines.push(registryAuthExactLine);
-            diffEntries.push({ newLine: registryAuthExactLine, type: 'added' });
-            didRewriteNpmrc = true;
-        }
-        else {
-            const oldLine = npmrcLines[registryAuthTokenLineIdx];
-            npmrcLines[registryAuthTokenLineIdx] = registryAuthExactLine;
-            diffEntries.push({ newLine: registryAuthExactLine, oldLine, type: 'replaced' });
-            didRewriteNpmrc = true;
-        }
-    }
-
-    if (didRewriteNpmrc) {
-        const patchedNpmrcContents = `${npmrcLines.join('\n').replace(/\n*$/u, '')}\n`;
-
+    if (didRewriteNpmrc && (patchedNpmrcContents !== null)) {
         await writeFile(resolvedNpmrcPath, patchedNpmrcContents);
         const diffLog = formatNpmrcDiff(diffEntries);
         if (diffLog) {
@@ -276,7 +296,7 @@ export async function spawnAuthNpmAsync(
         args,
         {
             cwd,
-            env: npmEnv,
+            env,
             ...spawnAsyncOptions,
         },
     )

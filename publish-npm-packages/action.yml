@@ -54,10 +54,6 @@ inputs:
     required: false
     default: '26'
 
-  npmrc_secrets:
-    description: Optional newline-delimited KEY=VALUE entries exposed to npm while installing publishable package dependencies
-    required: false
-
 runs:
   using: composite
   steps:
@@ -124,7 +120,6 @@ runs:
       shell: bash
       run: node "${{ github.action_path }}/prune-npm-by-git-diff.js"
       env:
-        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
         GITHUB_TOKEN: ${{ github.token }} # Used by `spawnAuthNpmAsync`.
         NPMJS_TOKEN: ${{ inputs.npmjs_token }} # Auth token for querying the npmjs registry.
 
@@ -134,26 +129,23 @@ runs:
       shell: bash
       run: node "${{ github.action_path }}/install-npm-deps.js"
       env:
-        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
-        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+        GITHUB_TOKEN: ${{ github.token }} # Used as an authentication token for `ghp` in `spawnAuthNpmAsync` when `preferActionToken` is `true` or when the provided token is missing from env.
 
     - name: Build
       if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' }}
       shell: bash
       run: node "${{ github.action_path }}/build-npm.js"
       env:
-        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
-        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+        GITHUB_TOKEN: ${{ github.token }} # Used as an authentication token for `ghp` in `spawnAuthNpmAsync` when `preferActionToken` is `true` or when the provided token is missing from env.
 
     - name: Prune by build diff
       if: ${{ toJSON(fromJSON(env.TARGETS_JSON)[0]) != 'null' && !contains(fromJSON('[true, "true"]'), fromJSON(toJSON(inputs.disable_prune_by_build_diff))) }}
       shell: bash
       run: node "${{ github.action_path }}/prune-npm-by-build-diff.js"
       env:
-        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
-        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+        GITHUB_TOKEN: ${{ github.token }} # Used as an authentication token for `ghp` in `spawnAuthNpmAsync` when `preferActionToken` is `true` or when the provided token is missing from env.
         NPMJS_TOKEN: ${{ inputs.npmjs_token }} # Auth token for querying the npmjs registry.
-      # `GITHUB_TOKEN`, `NPMRC_SECRETS`, `GHP_SCOPE`, `REGISTRY`, `TOOLKIT_PATH` are set in the workflow/action env (supra).
+      # `GITHUB_TOKEN`, `GHP_SCOPE`, `REGISTRY`, `TOOLKIT_PATH` are set in the workflow/action env (supra).
       # `GITHUB_REPOSITORY`, `GITHUB_OUTPUT`, `GITHUB_WORKSPACE` are injected automatically by GitHub Actions.
       # <DEPRECATED>
       # run: >-
@@ -170,10 +162,9 @@ runs:
       run: node "${{ github.action_path }}/resolve-npm-version-conflicts.js"
       env:
         MERGE_PR: ${{ inputs.merge_pr }}
-        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
-        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+        GITHUB_TOKEN: ${{ github.token }} # Used as an authentication token for `ghp` in `spawnAuthNpmAsync` when `preferActionToken` is `true` or when the provided token is missing from env.
         NPMJS_TOKEN: ${{ inputs.npmjs_token }} # Auth token for querying the npmjs registry.
-      # `GITHUB_TOKEN`, `MERGE_PR`, `GHP_SCOPE`, `NPMRC_SECRETS`, `TOOLKIT_PATH`, and `VERSION_CONFLICT_POLICY` are set in the workflow/action env (supra).
+      # `GITHUB_TOKEN`, `MERGE_PR`, `GHP_SCOPE`, `TOOLKIT_PATH`, and `VERSION_CONFLICT_POLICY` are set in the workflow/action env (supra).
       # `GITHUB_REPOSITORY`, `GITHUB_OUTPUT`, `GITHUB_WORKSPACE` are injected automatically by GitHub Actions.
       # <DEPRECATED>
       # run: >-
@@ -192,7 +183,7 @@ runs:
       if: ${{ steps.resolve_versions_conflicts.outputs.version_files != '' }}
       uses: peter-evans/create-pull-request@v8 # TODO: fork, and add a cleanup stage, where if the PR exists at the end of the workflow (due to an error in a subsequent step), it is closed with a comment linking to the workflow run.
       with:
-        token: ${{ github.token }} # Or `secrets.GITHUB_TOKEN` (unless called from another workflow which hadn't forwarded this secret)
+        token: ${{ github.token }}
         add-paths: ${{ steps.resolve_versions_conflicts.outputs.version_files }}
         author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
         base: ${{ env.BASE_BRANCH }}
@@ -216,7 +207,7 @@ runs:
       shell: bash
       run: node "$TOOLKIT_PATH/merge-versions-update-pr.js"
       env:
-        GITHUB_TOKEN: ${{ github.token }} # Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret)
+        GITHUB_TOKEN: ${{ github.token }}
         PULL_REQUEST_NUMBER: ${{ steps.create_versions_pr.outputs.pull-request-number }}
 
     - name: Refresh checkout after merge
@@ -229,7 +220,6 @@ runs:
       shell: bash
       run: node "${{ github.action_path }}/publish-npm.js"
       env:
-        NPMRC_SECRETS: ${{ inputs.npmrc_secrets }}
-        GITHUB_TOKEN: ${{ github.token }} # Used as a fallback to `NPMRC_SECRETS` by `spawnAuthNpmAsync`. Or `secrets.GITHUB_TOKEN` (unless called from another workflow which had not forwarded this secret).
+        GITHUB_TOKEN: ${{ github.token }} # Used by `spawnAuthNpmAsync` for publishing to ghp.
         NPMJS_TOKEN: ${{ inputs.npmjs_token }} # Auth token for publishing to the npmjs registry.
         STAGE_TO_NPMJS: ${{ inputs.stage_to_npmjs }}

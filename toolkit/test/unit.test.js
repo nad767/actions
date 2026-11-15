@@ -3,6 +3,7 @@ import test, { describe } from 'node:test';
 
 import { findOverlappingStagedNpmPackages } from '../utils/findOverlappingStagedNpmPackages.js';
 import { normalizeNpmsConf } from '../utils/normalizeNpmsConf.js';
+import { NPM_REGISTRIES } from '../utils/npmRegistries.js';
 import { parseBoolean } from '../utils/parseBoolean.js';
 import { resolveNpmRegistries, resolveNpmRegistryEntry } from '../utils/resolveNpmRegistries.js';
 import { rewriteNpmPackageName } from '../utils/rewriteNpmPackageName.js';
@@ -12,6 +13,7 @@ import {
     ANSI_RESET,
     formatInlineDiff,
     formatNpmrcDiff,
+    reconcileNpmrcContents,
     tokenizeDiffLine,
 } from '../utils/spawnAuthNpmAsync.js';
 
@@ -308,5 +310,113 @@ describe('spawnAuthNpmAsync diff logging', () => {
 
     test('formatNpmrcDiff returns empty string when no entries', () => {
         assert.equal(formatNpmrcDiff([]), '');
+    });
+});
+
+describe('reconcileNpmrcContents', () => {
+    const baseNpmrc = [
+        '@nad767:registry=https://npm.pkg.github.com',
+        '//npm.pkg.github.com/:_authToken=${GH_CLASSIC_PAT_NAD767_PACKAGES_READ}',
+    ].join('\n');
+
+    test('preferActionToken=false preserves resolvable .npmrc token for reads', () => {
+        const result = reconcileNpmrcContents({
+            ghpScope: 'nad767',
+            npmEnv: {
+                GH_CLASSIC_PAT_NAD767_PACKAGES_READ: 'ghp_read',
+                GITHUB_TOKEN: 'ghs_action',
+            },
+            npmrcContents: baseNpmrc,
+            npmrcPath: '/tmp/.npmrc',
+            preferActionToken: false,
+            registryEntry: NPM_REGISTRIES.ghp,
+        });
+
+        assert.equal(result.didRewriteNpmrc, false);
+        assert.equal(result.patchedNpmrcContents, null);
+        assert.deepEqual(result.diffEntries, []);
+    });
+
+    test('preferActionToken=true overrides resolvable .npmrc token when action token is present', () => {
+        const result = reconcileNpmrcContents({
+            ghpScope: 'nad767',
+            isPublishCommand: true,
+            npmEnv: {
+                GH_CLASSIC_PAT_NAD767_PACKAGES_READ: 'ghp_read',
+                GITHUB_TOKEN: 'ghs_action',
+            },
+            npmrcContents: baseNpmrc,
+            npmrcPath: '/tmp/.npmrc',
+            preferActionToken: true,
+            registryEntry: NPM_REGISTRIES.ghp,
+        });
+
+        assert.equal(result.didRewriteNpmrc, true);
+        assert.equal(
+            result.patchedNpmrcContents,
+            '@nad767:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}\n',
+        );
+        assert.deepEqual(result.diffEntries, [
+            {
+                newLine: '//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}',
+                oldLine: '//npm.pkg.github.com/:_authToken=${GH_CLASSIC_PAT_NAD767_PACKAGES_READ}',
+                type: 'replaced',
+            },
+        ]);
+    });
+
+    test('preferActionToken=true does not rewrite when .npmrc already uses the action token', () => {
+        const npmrcWithActionToken = [
+            '@nad767:registry=https://npm.pkg.github.com',
+            '//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}',
+        ].join('\n');
+
+        const result = reconcileNpmrcContents({
+            ghpScope: 'nad767',
+            isPublishCommand: true,
+            npmEnv: { GITHUB_TOKEN: 'ghs_action' },
+            npmrcContents: npmrcWithActionToken,
+            npmrcPath: '/tmp/.npmrc',
+            preferActionToken: true,
+            registryEntry: NPM_REGISTRIES.ghp,
+        });
+
+        assert.equal(result.didRewriteNpmrc, false);
+        assert.equal(result.patchedNpmrcContents, null);
+    });
+
+    test('preferActionToken=true falls back to resolvable .npmrc token when action token is absent', () => {
+        const npmrcWithCustomToken = [
+            '@nad767:registry=https://registry.npmjs.org/',
+            '//registry.npmjs.org/:_authToken=${CUSTOM_NPM_TOKEN}',
+        ].join('\n');
+
+        const result = reconcileNpmrcContents({
+            ghpScope: 'nad767',
+            isPublishCommand: true,
+            npmEnv: { CUSTOM_NPM_TOKEN: 'npm_custom' },
+            npmrcContents: npmrcWithCustomToken,
+            npmrcPath: '/tmp/.npmrc',
+            preferActionToken: true,
+            registryEntry: NPM_REGISTRIES.npmjs,
+        });
+
+        assert.equal(result.didRewriteNpmrc, false);
+        assert.equal(result.patchedNpmrcContents, null);
+    });
+
+    test('throws when neither action token nor resolvable .npmrc token is present for publish', () => {
+        assert.throws(
+            () => reconcileNpmrcContents({
+                ghpScope: 'nad767',
+                isPublishCommand: true,
+                npmEnv: {},
+                npmrcContents: null,
+                npmrcPath: '/tmp/.npmrc',
+                preferActionToken: true,
+                registryEntry: NPM_REGISTRIES.ghp,
+            }),
+            /Missing `GITHUB_TOKEN`/,
+        );
     });
 });
